@@ -355,6 +355,34 @@ static bool fd_regular(int fd, struct stat *status_out) {
     return true;
 }
 
+#if defined(CBM_EMBEDDED_BUILD_FINGERPRINT) && defined(__linux__)
+/* Embedded build fingerprint (fork patch).
+ *
+ * The fingerprint is a SHA-256 of the whole executable, and the daemon runtime takes it of its own
+ * image on every process start: the CLI, the daemon it spawns, and the identity checks between
+ * them. The binary carries every grammar and an embedding model — about 300 MB — so each hash is
+ * ~0.5 s on one CPU, paid several times per CLI call.
+ *
+ * A build that defines CBM_EMBEDDED_BUILD_FINGERPRINT (64 hex characters, passed through
+ * CFLAGS_EXTRA) answers for its own image without reading it. "Own image" is decided by identity,
+ * not by path: the file must be the one /proc/self/exe names — same device, inode, size and
+ * modification time. Any other file, such as a staged self-update candidate, is still hashed in
+ * full, so comparisons against a different binary keep their meaning. */
+#define CBM_FP_STR_(x) #x
+#define CBM_FP_STR(x) CBM_FP_STR_(x)
+static const char cbm_embedded_build_fingerprint[] = CBM_FP_STR(CBM_EMBEDDED_BUILD_FINGERPRINT);
+_Static_assert(sizeof(cbm_embedded_build_fingerprint) == CBM_DAEMON_BUILD_FINGERPRINT_SIZE,
+               "CBM_EMBEDDED_BUILD_FINGERPRINT must be exactly 64 hex characters");
+
+static bool fd_is_own_image(const struct stat *status) {
+    struct stat self;
+    return stat("/proc/self/exe", &self) == 0 && S_ISREG(self.st_mode) &&
+           self.st_dev == status->st_dev && self.st_ino == status->st_ino &&
+           self.st_size == status->st_size && self.st_mtim.tv_sec == status->st_mtim.tv_sec &&
+           self.st_mtim.tv_nsec == status->st_mtim.tv_nsec;
+}
+#endif
+
 bool cbm_daemon_build_fingerprint_native_file(uintptr_t native_file,
                                               char out[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
     if (!out) {
@@ -369,6 +397,12 @@ bool cbm_daemon_build_fingerprint_native_file(uintptr_t native_file,
     if (fd < 0 || !fd_regular(fd, &before) || before.st_size < 0) {
         return false;
     }
+#if defined(CBM_EMBEDDED_BUILD_FINGERPRINT) && defined(__linux__)
+    if (fd_is_own_image(&before)) {
+        memcpy(out, cbm_embedded_build_fingerprint, CBM_DAEMON_BUILD_FINGERPRINT_SIZE);
+        return true;
+    }
+#endif
 
     cbm_sha256_ctx context;
     cbm_sha256_init(&context);
