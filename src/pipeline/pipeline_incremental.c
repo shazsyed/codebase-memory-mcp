@@ -3244,6 +3244,73 @@ done:
     return 1;
 }
 
+/* ── Project root on the non-dump routes ─────────────────────────
+ *
+ * projects.root_path is written only by the full dump, so a no-op or a
+ * closure repair of the same content from a DIFFERENT directory kept the
+ * previous run's root — and get_code_snippet, which reads source through
+ * it, served "(source not available)" once that directory was gone. A
+ * caller that indexes a fresh checkout per run (reviewd clones per job)
+ * hit that on every run whose content was unchanged.
+ *
+ * Only root_path moves: indexed_at is also the coverage generation stamp,
+ * and nothing about the graph changed. */
+static bool incr_root_matches(cbm_store_t *store, const char *project, const char *root) {
+    cbm_project_t info = {0};
+    if (cbm_store_get_project(store, project, &info) != CBM_STORE_OK) {
+        return false;
+    }
+    bool same = info.root_path && root && strcmp(info.root_path, root) == 0;
+    cbm_project_free_fields(&info);
+    return same;
+}
+
+static bool incr_set_root(cbm_store_t *store, const char *project, const char *root) {
+    sqlite3 *db = cbm_store_get_db(store);
+    sqlite3_stmt *stmt = NULL;
+    if (!db || !root ||
+        sqlite3_prepare_v2(db, "UPDATE projects SET root_path = ?1 WHERE name = ?2;",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, root, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+/* The no-op route's publish. The live generation is opened immutable by
+ * readers, so it is never written in place: clone it, move the root in the
+ * clone, and atomically replace — the same tail the closure route uses.
+ * Any failure returns CBM_PIPELINE_FORCE_FULL_REINDEX, whose dump writes the
+ * root anyway. */
+static int incr_publish_root(cbm_pipeline_t *p, const char *db_path, const char *project,
+                             const char *root) {
+    char *stage = NULL;
+    if (cbm_delta_stage_clone(db_path, &stage) != 0) {
+        return CBM_PIPELINE_FORCE_FULL_REINDEX;
+    }
+    cbm_store_t *staging = cbm_store_open_path_existing(stage);
+    bool ok = staging && incr_set_root(staging, project, root) &&
+              cbm_store_generation_advance(staging) == CBM_STORE_OK &&
+              cbm_store_check_integrity(staging) &&
+              cbm_store_seal_for_atomic_publish(staging) == CBM_STORE_OK;
+    if (staging) {
+        cbm_store_close(staging);
+    }
+    if (!ok) {
+        cbm_pipeline_discard_stage(stage);
+        free(stage);
+        cbm_log_warn("incremental.root_publish_failed", "project", project);
+        return CBM_PIPELINE_FORCE_FULL_REINDEX;
+    }
+    int rc = cbm_pipeline_finalize_staged_generation(stage, db_path,
+                                                     cbm_pipeline_cancelled_ptr(p), true);
+    free(stage);
+    return rc;
+}
+
 /* ── Delta-repair orchestration (closure route) ──────────────────
  *
  * The closure route's executor: clone the live generation, repair the
@@ -3958,13 +4025,16 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
             incr_generation_exact(p, store, project, stored, stored_count, baseline_manifest,
                                   baseline_count, &metadata_current, &doc_links_current);
         if (exact) {
+            const char *root = cbm_pipeline_repo_path(p);
+            bool root_current = incr_root_matches(store, project, root);
             cbm_store_free_file_hashes(stored, stored_count);
             cbm_store_close(store);
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
             incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_NOOP);
 #endif
-            cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal");
-            return 0;
+            cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal", "root_moved",
+                         root_current ? "false" : "true");
+            return root_current ? 0 : incr_publish_root(p, db_path, project, root);
         }
         if (force_full_on_mismatch) {
             cbm_store_free_file_hashes(stored, stored_count);
