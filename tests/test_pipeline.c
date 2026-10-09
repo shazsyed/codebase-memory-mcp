@@ -3199,6 +3199,86 @@ static int pipeline_test_set_mtime(const char *path, time_t seconds, long nanose
  * mtime so metadata heuristics cannot make the test pass: byte hashes must route
  * the semantic change to a full rebuild. A metadata-only mtime change is a true
  * no-op and must not rebuild. */
+/* A caller that indexes a fresh checkout of the same repository each time
+ * (one clone per review job) changes the directory but not the content. The
+ * no-op and closure routes never rebuilt the projects row, so root_path kept
+ * naming the first, since-deleted directory and get_code_snippet answered
+ * "(source not available)". Every route must leave the root where it ran. */
+static bool root_move_is(const char *db_path, const char *project, const char *want) {
+    cbm_store_t *store = cbm_store_open_path_query(db_path);
+    if (!store) {
+        return false;
+    }
+    cbm_project_t info = {0};
+    bool same = cbm_store_get_project(store, project, &info) == CBM_STORE_OK && info.root_path &&
+                strcmp(info.root_path, want) == 0;
+    if (!same) {
+        fprintf(stderr, "  root_path is %s, want %s\n", info.root_path ? info.root_path : "(none)",
+                want);
+    }
+    cbm_project_free_fields(&info);
+    cbm_store_close(store);
+    return same;
+}
+
+static int root_move_index(const char *repo, const char *db_path) {
+    cbm_pipeline_incremental_test_reset_faults();
+    cbm_pipeline_t *p = cbm_pipeline_new(repo, db_path, CBM_MODE_FULL);
+    if (!p || !cbm_pipeline_set_project_name(p, "moved")) {
+        cbm_pipeline_free(p);
+        return -1;
+    }
+    int rc = cbm_pipeline_run(p);
+    cbm_pipeline_free(p);
+    return rc;
+}
+
+TEST(pipeline_incremental_moves_root_on_every_route) {
+    char a[256], b[256], c[256], store_dir[256];
+    snprintf(a, sizeof(a), "/tmp/cbm_root_a_XXXXXX");
+    snprintf(b, sizeof(b), "/tmp/cbm_root_b_XXXXXX");
+    snprintf(c, sizeof(c), "/tmp/cbm_root_c_XXXXXX");
+    snprintf(store_dir, sizeof(store_dir), "/tmp/cbm_root_db_XXXXXX");
+    if (!cbm_mkdtemp(a) || !cbm_mkdtemp(b) || !cbm_mkdtemp(c) || !cbm_mkdtemp(store_dir)) {
+        FAIL("tmpdir");
+    }
+    static const char before[] = "package moved\n"
+                                 "func rootMoveCallee() int { return 1 }\n"
+                                 "func rootMoveCaller() int { return rootMoveCallee() }\n";
+    static const char after[] = "package moved\n"
+                                "func rootMoveCallee() int { return 2 }\n"
+                                "func rootMoveCaller() int { return rootMoveCallee() }\n";
+    write_temp_file(a, "moved.go", before);
+    write_temp_file(b, "moved.go", before);
+    write_temp_file(c, "moved.go", after);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/moved.db", store_dir);
+
+    ASSERT_EQ(root_move_index(a, db_path), 0);
+    ASSERT_TRUE(root_move_is(db_path, "moved", a));
+
+    /* Same bytes, new directory: the no-op route. */
+    ASSERT_EQ(root_move_index(b, db_path), 0);
+    ASSERT_EQ(cbm_pipeline_incremental_test_last_route(), CBM_INCREMENTAL_ROUTE_NOOP);
+    ASSERT_TRUE(root_move_is(db_path, "moved", b));
+
+    /* Same bytes, same directory: still a no-op, nothing to move. */
+    ASSERT_EQ(root_move_index(b, db_path), 0);
+    ASSERT_EQ(cbm_pipeline_incremental_test_last_route(), CBM_INCREMENTAL_ROUTE_NOOP);
+    ASSERT_TRUE(root_move_is(db_path, "moved", b));
+
+    /* A body edit in a new directory: the closure route. */
+    ASSERT_EQ(root_move_index(c, db_path), 0);
+    ASSERT_EQ(cbm_pipeline_incremental_test_last_route(), CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_TRUE(root_move_is(db_path, "moved", c));
+
+    rm_rf(a);
+    rm_rf(b);
+    rm_rf(c);
+    rm_rf(store_dir);
+    PASS();
+}
+
 TEST(pipeline_incremental_repoints_call_reference_without_stale_edge) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/cbm_ref_incr_XXXXXX");
@@ -22721,6 +22801,7 @@ SUITE(pipeline) {
 SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(incremental_downgrade_preserves_scope_and_artifact_across_change_noop_delete);
     RUN_TEST(pipeline_incremental_repoints_call_reference_without_stale_edge);
+    RUN_TEST(pipeline_incremental_moves_root_on_every_route);
     RUN_TEST(pipeline_staged_publish_commits_below_full_sync_issue1419);
     RUN_TEST(incremental_k8s_edits_reach_other_files);
     RUN_TEST(incremental_shell_deploy_edit_keeps_its_edges);
