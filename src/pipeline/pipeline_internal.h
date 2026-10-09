@@ -1250,8 +1250,13 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
  *      (the enum name is no longer a segment); typedef names, anonymous-enum
  *      constants and macro-prefixed functions are nodes; a bodyless
  *      `struct X` is no node. An index written before this holds the old
- *      QNs for every unchanged file, so it is rebuilt in full once. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 4 };
+ *      QNs for every unchanged file, so it is rebuilt in full once.
+ *   5: (reviewd fork) Go call resolution changed: a struct field typed through
+ *      its own file's import alias now resolves from another package, and a
+ *      name guess from a non-test Go file never binds a *_test.go definition.
+ *      Unchanged files would keep edges resolved the old way, so rebuild once.
+ *      Upstream may claim 5 for something else; on rebase, take max + 1. */
+enum { CBM_SEMANTIC_INDEX_VERSION = 5 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;

@@ -283,6 +283,13 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
 bool cbm_registry_name_guess_vetoed(const cbm_registry_t *r, CBMLanguage caller_lang,
                                     const cbm_resolution_t *res);
 
+/* (reviewd fork) True when a Go caller outside *_test.go got a name-only guess
+ * whose target node is declared in a *_test.go file, which Go code outside
+ * tests cannot reach. pass_calls.c and pass_parallel.c MUST apply it identically. */
+struct cbm_gbuf;
+bool cbm_registry_go_test_target_vetoed(const struct cbm_gbuf *gbuf, CBMLanguage caller_lang,
+                                        const char *caller_rel, const cbm_resolution_t *res);
+
 /* Relation-permitting resolve for SQL FROM/JOIN lineage usages ONLY — the one
  * consumer allowed to bind Table/View targets. Uncached (the per-file resolve
  * cache stores the default variant's relation-vetoed answers). */
