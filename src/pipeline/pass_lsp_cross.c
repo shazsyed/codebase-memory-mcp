@@ -3091,6 +3091,90 @@ static void pxc_mark_reexport_targets(const CBMModuleDefIndex *idx, bool *select
     cbm_free(CBM_MEM_CLASS_EXTRACT, queued);
 }
 
+/* (reviewd fork) Go: a selected struct's field may be typed through its own
+ * file's import alias ("ConfigRepo posrepo.ConfigRepo" in internal/svc). The
+ * Go resolver requalifies such a field against every type named <Name>
+ * (go_requalify_foreign_field), and the shared registry a full build uses has
+ * them all. A per-file set filtered to the caller's own and imported modules
+ * has none of them -- a go-zero logic file imports svc, not the repository --
+ * so an incremental repair resolved the field to nothing and dropped an edge a
+ * full build kept. Select every module that declares a type of that name, so
+ * the per-file registry holds the same candidates and reaches the same answer;
+ * repeat for structs those modules bring in. */
+static bool pxc_go_field_type_name(const char *text, size_t len, char *out, size_t out_size) {
+    size_t i = 0;
+    while (i < len && (text[i] == '*' || (text[i] == '[' && i + 1 < len && text[i + 1] == ']'))) {
+        i += text[i] == '*' ? 1 : 2;
+    }
+    const char *dot = memchr(text + i, '.', len - i);
+    if (!dot || dot == text + i || memchr(dot + 1, '.', len - (size_t)(dot + 1 - text))) {
+        return false;
+    }
+    size_t n = len - (size_t)(dot + 1 - text);
+    if (n == 0 || n >= out_size) {
+        return false;
+    }
+    memcpy(out, dot + 1, n);
+    out[n] = '\0';
+    return true;
+}
+
+static void pxc_mark_go_field_type_modules(const CBMModuleDefIndex *idx, bool *selected,
+                                           const CBMLSPDef *all_defs, int *total) {
+    enum { MAX_ROUNDS = 4, MAX_NAMES = 256, NAME_CAP = 128 };
+    for (int round = 0; round < MAX_ROUNDS; round++) {
+        char names[MAX_NAMES][NAME_CAP];
+        int name_count = 0;
+        for (int i = 0; i < idx->def_count && name_count < MAX_NAMES; i++) {
+            const CBMLSPDef *d = &all_defs[i];
+            if (!selected[i] || d->lang != CBM_LANG_GO || !d->field_defs || !d->field_defs[0]) {
+                continue;
+            }
+            for (const char *p = d->field_defs; *p && name_count < MAX_NAMES;) {
+                const char *end = strchr(p, '|');
+                size_t len = end ? (size_t)(end - p) : strlen(p);
+                const char *colon = memchr(p, ':', len);
+                char name[NAME_CAP];
+                if (colon && pxc_go_field_type_name(colon + 1, len - (size_t)(colon + 1 - p), name,
+                                                    sizeof(name))) {
+                    bool seen = false;
+                    for (int k = 0; k < name_count && !seen; k++) {
+                        seen = strcmp(names[k], name) == 0;
+                    }
+                    if (!seen) {
+                        memcpy(names[name_count++], name, strlen(name) + 1);
+                    }
+                }
+                if (!end) {
+                    break;
+                }
+                p = end + 1;
+            }
+        }
+        if (name_count == 0) {
+            return;
+        }
+        int before = *total;
+        for (int i = 0; i < idx->def_count; i++) {
+            const CBMLSPDef *d = &all_defs[i];
+            if (d->lang != CBM_LANG_GO || !d->short_name || !d->label ||
+                !cbm_label_is_type_like(d->label) || !d->def_module_qn) {
+                continue;
+            }
+            for (int k = 0; k < name_count; k++) {
+                if (strcmp(names[k], d->short_name) == 0) {
+                    pxc_mark_module_defs(idx, selected, all_defs, CBM_LANG_GO, d->def_module_qn,
+                                         total);
+                    break;
+                }
+            }
+        }
+        if (*total == before) {
+            return;
+        }
+    }
+}
+
 CBMLSPDef *cbm_pxc_filter_defs_for_file(const CBMModuleDefIndex *idx, CBMLSPDef *all_defs,
                                         CBMLanguage caller_lang, const char *caller_namespace,
                                         const char *own_module, const char *const *imp_qns,
@@ -3117,6 +3201,9 @@ CBMLSPDef *cbm_pxc_filter_defs_for_file(const CBMModuleDefIndex *idx, CBMLSPDef 
         if (!pxc_mark_import_defs(idx, selected, all_defs, caller_lang, imp_qns[i], &total)) {
             goto failed; /* out_success remains false: dispatcher uses all_defs */
         }
+    }
+    if (caller_lang == CBM_LANG_GO) {
+        pxc_mark_go_field_type_modules(idx, selected, all_defs, &total);
     }
     if (pxc_is_jvm_lang(caller_lang) && idx->namespace_ht) {
         const char *namespace_key = pxc_namespace_index_key(caller_namespace);
