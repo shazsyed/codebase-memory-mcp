@@ -1021,8 +1021,8 @@ static bool calls_emit_lsp_target(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
 static cbm_resolution_t calls_registry_resolution(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                                   const char *module_qn, const char **imp_keys,
                                                   const char **imp_vals, int imp_count,
-                                                  CBMLanguage lang, bool rust_external,
-                                                  bool php_vendor_call) {
+                                                  CBMLanguage lang, const char *rel,
+                                                  bool rust_external, bool php_vendor_call) {
     cbm_resolution_t res = {0};
     if (!rust_external && !php_vendor_call) {
         /* Python LEGB fallback first (MUST match pass_parallel.c). */
@@ -1034,7 +1034,8 @@ static cbm_resolution_t calls_registry_resolution(cbm_pipeline_ctx_t *ctx, const
          * builtins.dict.get). The vetoed answer becomes EMPTY here, before
          * the fallbacks below, so the route/HTTP classification still runs.
          * MUST match pass_parallel.c. */
-        if (cbm_registry_name_guess_vetoed(ctx->registry, lang, &res)) {
+        if (cbm_registry_name_guess_vetoed(ctx->registry, lang, &res) ||
+            cbm_registry_go_test_target_vetoed(ctx->gbuf, lang, rel, &res)) {
             res = (cbm_resolution_t){0};
         }
     }
@@ -1155,8 +1156,9 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
      * classify the call. MUST match pass_parallel.c. */
     bool rust_external = lsp && cbm_pipeline_rust_external_target(
                                     lang, lsp->strategy, lsp->callee_qn, ctx->project_name);
-    cbm_resolution_t res = calls_registry_resolution(
-        ctx, call, module_qn, imp_keys, imp_vals, imp_count, lang, rust_external, php_vendor_call);
+    cbm_resolution_t res = calls_registry_resolution(ctx, call, module_qn, imp_keys, imp_vals,
+                                                     imp_count, lang, rel, rust_external,
+                                                     php_vendor_call);
     /* `p->open(fd)`: the registry does not split a callee on the arrow, and a
      * member is not a name it could resolve anyway. The object's type decides,
      * exactly as for the dot call handled further down. MUST match

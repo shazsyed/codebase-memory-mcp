@@ -1378,6 +1378,97 @@ TEST(golsp_crossfile_aliased_field_requal) {
     PASS();
 }
 
+/* go-zero's shape: a logic file reaches a repository through l.svcCtx, and the
+ * ServiceContext field is typed through internal/svc's OWN import alias
+ * ("posrepo.TableRepo"). The calling file imports svc only, so its import map
+ * cannot requalify "posrepo" -- the field must resolve from the defining
+ * package. Unresolved, the call fell to name matching and bound a same-package
+ * _test.go fake. Three cases: a unique type name resolves whatever the alias
+ * ("posrepo" names no directory); a shared name resolves to the package whose
+ * last segment is the alias; a shared name with no such package resolves to
+ * nothing rather than to a guess. */
+TEST(golsp_crossfile_foreign_struct_aliased_field) {
+    const char *source = "package pos\n\n"
+                         "import \"proj/internal/svc\"\n\n"
+                         "type UpdateConfigLogic struct {\n\tsvcCtx *svc.ServiceContext\n}\n\n"
+                         "func (l *UpdateConfigLogic) Unique(id int) error {\n"
+                         "\t_, err := l.svcCtx.TableRepo.Upsert(id)\n\treturn err\n}\n\n"
+                         "func (l *UpdateConfigLogic) ByAlias(id int) error {\n"
+                         "\t_, err := l.svcCtx.Legacy.Upsert(id)\n\treturn err\n}\n\n"
+                         "func (l *UpdateConfigLogic) Ambiguous(id int) error {\n"
+                         "\t_, err := l.svcCtx.Other.Upsert(id)\n\treturn err\n}\n";
+
+    CBMLSPDef defs[] = {
+        {.qualified_name = "proj.internal.logic.pos.UpdateConfigLogic",
+         .short_name = "UpdateConfigLogic",
+         .label = "Struct",
+         .def_module_qn = "proj.internal.logic.pos",
+         .field_defs = "svcCtx:*svc.ServiceContext"},
+        {.qualified_name = "proj.internal.svc.ServiceContext",
+         .short_name = "ServiceContext",
+         .label = "Struct",
+         .def_module_qn = "proj.internal.svc",
+         .field_defs = "TableRepo:posrepo.TableRepo|Legacy:legacy.ConfigRepo|Other:zz.ConfigRepo"},
+        {.qualified_name = "proj.internal.repository.pos.TableRepo",
+         .short_name = "TableRepo",
+         .label = "Interface",
+         .def_module_qn = "proj.internal.repository.pos",
+         .is_interface = true,
+         .method_names_str = "Upsert"},
+        {.qualified_name = "proj.internal.repository.pos.TableRepo.Upsert",
+         .short_name = "Upsert",
+         .label = "Method",
+         .def_module_qn = "proj.internal.repository.pos",
+         .receiver_type = "proj.internal.repository.pos.TableRepo",
+         .return_types = "string|error"},
+        {.qualified_name = "proj.internal.repository.pos.ConfigRepo",
+         .short_name = "ConfigRepo",
+         .label = "Interface",
+         .def_module_qn = "proj.internal.repository.pos",
+         .is_interface = true,
+         .method_names_str = "Upsert"},
+        {.qualified_name = "proj.internal.legacy.ConfigRepo",
+         .short_name = "ConfigRepo",
+         .label = "Interface",
+         .def_module_qn = "proj.internal.legacy",
+         .is_interface = true,
+         .method_names_str = "Upsert"},
+    };
+    const char *imp_names[] = {"svc"};
+    const char *imp_qns[] = {"proj.internal.svc"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+
+    CBMTypeRegistry *reg = cbm_go_build_cross_registry(&arena, defs, 6);
+    ASSERT_NOT_NULL(reg);
+    cbm_run_go_lsp_cross_with_registry(&arena, source, (int)strlen(source),
+                                       "proj.internal.logic.pos", reg, imp_names, imp_qns, 1, NULL,
+                                       &out);
+
+    const char *unique = NULL, *by_alias = NULL, *ambiguous = NULL;
+    for (int i = 0; i < out.count; i++) {
+        const CBMResolvedCall *rc = &out.items[i];
+        if (!rc->caller_qn || !rc->callee_qn || rc->confidence < 0.5f)
+            continue;
+        if (strstr(rc->caller_qn, ".Unique"))
+            unique = rc->callee_qn;
+        else if (strstr(rc->caller_qn, ".ByAlias"))
+            by_alias = rc->callee_qn;
+        else if (strstr(rc->caller_qn, ".Ambiguous"))
+            ambiguous = rc->callee_qn;
+    }
+    ASSERT_NOT_NULL(unique);
+    ASSERT_STR_EQ(unique, "proj.internal.repository.pos.TableRepo.Upsert");
+    ASSERT_NOT_NULL(by_alias);
+    ASSERT_STR_EQ(by_alias, "proj.internal.legacy.ConfigRepo.Upsert");
+    ASSERT_TRUE(ambiguous == NULL);
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 /* #2033: an identity alias declared in another file of the same package.
  * `type FeatureSet = bitmap` lives in one file, `bitmap.Set` in a second, the
  * call `reqs.Set` in a third, so none of it is in the calling file's AST and
@@ -1665,6 +1756,7 @@ SUITE(go_lsp) {
     RUN_TEST(golsp_crossfile_aliased_field_requal);
     RUN_TEST(golsp_crossfile_type_alias_method);
     RUN_TEST(golsp_crossfile_type_alias_method_prebuilt);
+    RUN_TEST(golsp_crossfile_foreign_struct_aliased_field);
     RUN_TEST(golsp_crossfile_map_index);
     RUN_TEST(golsp_crossfile_stdlib_interface);
     RUN_TEST(golsp_crossfile_local_interface_single_impl);

@@ -1663,8 +1663,13 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
  *  11: Python local defs and classes bind through their enclosing lexical
  *      scope, including app-factory route handlers. Published version 10
  *      predates this resolution, so unchanged files rebuild once on upgrade.
+ *  12: (reviewd fork) Go call resolution changed: a struct field typed through
+ *      its own file's import alias now resolves from another package, and a
+ *      name guess from a non-test Go file never binds a *_test.go definition.
+ *      Unchanged files would keep edges resolved the old way, so rebuild once.
+ *      Upstream may claim 12 for something else; on rebase, take max + 1.
  * The unresolved-call coverage threshold remains independent. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 11 };
+enum { CBM_SEMANTIC_INDEX_VERSION = 12 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;
