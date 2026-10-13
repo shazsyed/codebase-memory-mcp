@@ -3288,7 +3288,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * AFTER the field-type hint so the hint may still re-pick a compatible
          * candidate first, and BEFORE the empty-resolution fallbacks below so a
          * vetoed call still reaches route/HTTP classification. */
-        if (cbm_registry_name_guess_vetoed(rc->registry, lang, &res)) {
+        if (cbm_registry_name_guess_vetoed(rc->registry, lang, &res) ||
+            cbm_registry_go_test_target_vetoed(rc->main_gbuf, lang, rel, &res)) {
             res = (cbm_resolution_t){0};
         }
         atomic_fetch_add_explicit(&rc->time_ns_rc_hint, extract_now_ns() - _rc_t0,

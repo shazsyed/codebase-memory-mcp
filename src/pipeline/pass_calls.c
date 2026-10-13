@@ -974,7 +974,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
          * builtins.dict.get). The vetoed answer becomes EMPTY here, before
          * the fallbacks below, so the route/HTTP classification still runs.
          * MUST match pass_parallel.c. */
-        if (cbm_registry_name_guess_vetoed(ctx->registry, lang, &res)) {
+        if (cbm_registry_name_guess_vetoed(ctx->registry, lang, &res) ||
+            cbm_registry_go_test_target_vetoed(ctx->gbuf, lang, rel, &res)) {
             res = (cbm_resolution_t){0};
         }
     }

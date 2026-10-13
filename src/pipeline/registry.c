@@ -1793,20 +1793,46 @@ static CBMLanguage registry_entry_language(const cbm_registry_t *r, const char *
  * CALLS, 88% of them jest `describe()` bound to a project method).
  * field_type_hint is included: it re-picks by type-name substring across ALL
  * candidates, language-blind. */
+/* The strategies that bind by name alone, with no import or type evidence. */
+static bool name_guess_strategy(const char *strategy) {
+    return strategy &&
+           (strcmp(strategy, "unique_name") == 0 || strcmp(strategy, "suffix_match") == 0 ||
+            strcmp(strategy, "qualified_suffix") == 0 ||
+            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "same_module") == 0);
+}
+
 bool cbm_registry_name_guess_vetoed(const cbm_registry_t *r, CBMLanguage caller_lang,
                                     const cbm_resolution_t *res) {
     if (!r || !res || caller_lang < 0 || caller_lang >= CBM_LANG_COUNT || !res->qualified_name ||
-        !res->qualified_name[0] || !res->strategy) {
-        return false;
-    }
-    if (strcmp(res->strategy, "unique_name") != 0 && strcmp(res->strategy, "suffix_match") != 0 &&
-        strcmp(res->strategy, "qualified_suffix") != 0 &&
-        strcmp(res->strategy, "field_type_hint") != 0 &&
-        strcmp(res->strategy, "same_module") != 0) {
+        !res->qualified_name[0] || !name_guess_strategy(res->strategy)) {
         return false;
     }
     return !cbm_lang_resolution_compatible(caller_lang,
                                            registry_entry_language(r, res->qualified_name));
+}
+
+static bool is_go_test_path(const char *path) {
+    size_t n = path ? strlen(path) : 0;
+    return n >= 8 && strcmp(path + n - 8, "_test.go") == 0;
+}
+
+/* (reviewd fork) A Go file outside *_test.go cannot call anything declared in
+ * one: the compiler leaves test files out of every non-test build. A name
+ * guess that lands there is wrong by construction -- in go-zero services it
+ * was a same-package fake standing in for the real repository, which hid the
+ * real write path from every caller query. The target's file is read from its
+ * graph node, which full, parallel and incremental (proxy) graphs all carry,
+ * so the three agree. Type-resolved (lsp_*) and import-map answers are never
+ * vetoed: a collided QN can put a production method's node in a test file. */
+bool cbm_registry_go_test_target_vetoed(const cbm_gbuf_t *gbuf, CBMLanguage caller_lang,
+                                        const char *caller_rel, const cbm_resolution_t *res) {
+    if (caller_lang != CBM_LANG_GO || !gbuf || !res || !res->qualified_name ||
+        !res->qualified_name[0] || is_go_test_path(caller_rel) ||
+        !name_guess_strategy(res->strategy)) {
+        return false;
+    }
+    const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(gbuf, res->qualified_name);
+    return target && is_go_test_path(target->file_path);
 }
 
 static cbm_resolution_t registry_resolve_scoped(const cbm_registry_t *r, const char *callee_name,

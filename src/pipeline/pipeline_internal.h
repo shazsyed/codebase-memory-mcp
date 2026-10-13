@@ -1391,8 +1391,13 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
  *      diagrams are Diagram/DiagramElement nodes with DIAGRAM_ARROW edges;
  *      OpenAPI operations are Routes; a Markdown section's text keeps a
  *      diagram fence's labels instead of its syntax, and its candidates
- *      carry the p of its diagrams' kind family. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 7 };
+ *      carry the p of its diagrams' kind family.
+ *   8: (reviewd fork) Go call resolution changed: a struct field typed through
+ *      its own file's import alias now resolves from another package, and a
+ *      name guess from a non-test Go file never binds a *_test.go definition.
+ *      Unchanged files would keep edges resolved the old way, so rebuild once.
+ *      Upstream may claim 8 for something else; on rebase, take max + 1. */
+enum { CBM_SEMANTIC_INDEX_VERSION = 8 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;
