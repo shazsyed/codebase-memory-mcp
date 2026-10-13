@@ -3585,6 +3585,101 @@ static int root_move_index(const char *repo, const char *db_path) {
     return rc;
 }
 
+/* (reviewd fork) go-zero: a logic file calls a repository through
+ * l.svcCtx.<Repo>, whose ServiceContext field is typed through internal/svc's
+ * own import alias, and the logic package's _test.go holds a fake with the
+ * same method names. The call must bind the repository's interface, and no
+ * production file may get a CALLS edge into a *_test.go file -- Go cannot
+ * compile one. The test's own call to the logic stays. */
+static int go_fake_count(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *st = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
+        n = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
+TEST(pipeline_go_logic_binds_repository_not_test_fake) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_go_fake_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "go.mod", "module example.com/fake\n\ngo 1.22\n");
+    write_temp_file(tmp, "internal/repository/pos/config_repo.go",
+                    "package pos\n\nimport \"context\"\n\n"
+                    "type ConfigRepo interface {\n"
+                    "\tUpsert(ctx context.Context, id int) (string, error)\n}\n\n"
+                    "type ConfigRepository struct{}\n\n"
+                    "func (r *ConfigRepository) Upsert(ctx context.Context, id int) (string, "
+                    "error) { return \"\", nil }\n");
+    write_temp_file(tmp, "internal/svc/servicecontext.go",
+                    "package svc\n\n"
+                    "import posrepo \"example.com/fake/internal/repository/pos\"\n\n"
+                    "type ServiceContext struct {\n\tConfigRepo posrepo.ConfigRepo\n}\n");
+    write_temp_file(tmp, "internal/logic/pos/update.go",
+                    "package pos\n\nimport (\n\t\"context\"\n\n"
+                    "\t\"example.com/fake/internal/svc\"\n)\n\n"
+                    "type UpdateConfigLogic struct {\n\tctx    context.Context\n"
+                    "\tsvcCtx *svc.ServiceContext\n}\n\n"
+                    "func (l *UpdateConfigLogic) UpdateConfig(id int) (string, error) {\n"
+                    "\treturn l.svcCtx.ConfigRepo.Upsert(l.ctx, id)\n}\n\n"
+                    "func (l *UpdateConfigLogic) Flush() { l.svcCtx.Flusher.FlushAll() }\n");
+    write_temp_file(tmp, "internal/logic/pos/update_test.go",
+                    "package pos\n\nimport (\n\t\"context\"\n\t\"testing\"\n\n"
+                    "\t\"example.com/fake/internal/svc\"\n)\n\n"
+                    "type fakeConfigRepo struct{}\n\n"
+                    "func (f *fakeConfigRepo) Upsert(_ context.Context, id int) (string, error) "
+                    "{ return \"x\", nil }\n\n"
+                    "func (f *fakeConfigRepo) FlushAll() {}\n\n"
+                    "func TestUpdate(t *testing.T) {\n"
+                    "\tl := &UpdateConfigLogic{svcCtx: &svc.ServiceContext{ConfigRepo: "
+                    "&fakeConfigRepo{}}}\n\t_, _ = l.UpdateConfig(1)\n}\n");
+
+    char store_dir[256];
+    snprintf(store_dir, sizeof(store_dir), "/tmp/cbm_go_fake_db_XXXXXX");
+    if (!cbm_mkdtemp(store_dir)) {
+        FAIL("tmpdir");
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/fake.db", store_dir);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_TRUE(cbm_pipeline_set_project_name(p, "fake"));
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_pipeline_free(p);
+
+    cbm_store_t *store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    sqlite3 *db = cbm_store_get_db(store);
+    ASSERT_NOT_NULL(db);
+    /* Through the alias: the repository's interface method. */
+    ASSERT_EQ(go_fake_count(db, "SELECT count(*) FROM edges e JOIN nodes s ON s.id=e.source_id "
+                                "JOIN nodes t ON t.id=e.target_id WHERE e.type='CALLS' "
+                                "AND s.name='UpdateConfig' "
+                                "AND t.qualified_name LIKE '%repository.pos.ConfigRepo.Upsert'"),
+              1);
+    /* Nothing from production code into a test file -- including FlushAll,
+     * which only the fake defines (the name guess is dropped, not rebound). */
+    ASSERT_EQ(go_fake_count(db, "SELECT count(*) FROM edges e JOIN nodes s ON s.id=e.source_id "
+                                "JOIN nodes t ON t.id=e.target_id WHERE e.type='CALLS' "
+                                "AND s.file_path NOT LIKE '%_test.go' "
+                                "AND t.file_path LIKE '%_test.go'"),
+              0);
+    /* The test still reaches the logic it exercises. */
+    ASSERT_EQ(go_fake_count(db, "SELECT count(*) FROM edges e JOIN nodes s ON s.id=e.source_id "
+                                "JOIN nodes t ON t.id=e.target_id WHERE e.type='CALLS' "
+                                "AND s.name='TestUpdate' AND t.name='UpdateConfig'"),
+              1);
+    cbm_store_close(store);
+
+    rm_rf(tmp);
+    rm_rf(store_dir);
+    PASS();
+}
+
 TEST(pipeline_incremental_moves_root_on_every_route) {
     char a[256], b[256], c[256], store_dir[256];
     snprintf(a, sizeof(a), "/tmp/cbm_root_a_XXXXXX");
@@ -28739,6 +28834,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(incremental_downgrade_preserves_scope_and_artifact_across_change_noop_delete);
     RUN_TEST(pipeline_incremental_repoints_call_reference_without_stale_edge);
     RUN_TEST(pipeline_incremental_moves_root_on_every_route);
+    RUN_TEST(pipeline_go_logic_binds_repository_not_test_fake);
     RUN_TEST(pipeline_staged_publish_commits_below_full_sync_issue1419);
     RUN_TEST(incremental_k8s_edits_reach_other_files);
     RUN_TEST(incremental_shell_deploy_edit_keeps_its_edges);

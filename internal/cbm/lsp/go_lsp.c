@@ -969,6 +969,87 @@ static const char *go_requalify_via_imports(GoLSPContext *ctx, const char *type_
     return NULL;
 }
 
+/* A field type read from another package's struct is qualified as
+ * "<owner module>.<text>" by parse_field_defs_into_type. When the text names
+ * its package through that file's import ("posrepo.TableSideConfigRepo" in
+ * internal/svc), the result names nothing. go_requalify_via_imports can repair
+ * it only with the CALLER's imports, and a go-zero logic file reaching a
+ * repository through l.svcCtx imports svc, never the repository package, so
+ * every such call fell through to name matching -- which picked a same-package
+ * _test.go fake whenever one existed.
+ *
+ * Resolve the alias segment against the project's types instead: a type named
+ * <Name> in a package whose last segment is <alias>, otherwise the only type
+ * named <Name> anywhere. Anything ambiguous returns NULL and changes nothing.
+ * The owner's module, not the caller's, is what the text was written in. */
+static const char *go_requalify_foreign_field(GoLSPContext *ctx, const char *owner_qn,
+                                              const char *type_qn) {
+    const char *owner_dot = owner_qn ? strrchr(owner_qn, '.') : NULL;
+    if (!owner_dot || !type_qn)
+        return NULL;
+    size_t mod_len = (size_t)(owner_dot - owner_qn);
+    if (strncmp(type_qn, owner_qn, mod_len) != 0 || type_qn[mod_len] != '.')
+        return NULL;
+    const char *alias = type_qn + mod_len + 1;
+    const char *dot = strchr(alias, '.');
+    if (!dot || dot == alias || strchr(dot + 1, '.') || !dot[1])
+        return NULL;
+    size_t alias_len = (size_t)(dot - alias);
+    const char *name = dot + 1;
+    size_t name_len = strlen(name);
+
+    const char *by_alias = NULL, *by_name = NULL;
+    int alias_hits = 0, name_hits = 0;
+    CBMTypeShortIter it;
+    /* _chain: a per-file overlay is empty; the project's types are in the
+     * shared registry it falls back to. */
+    cbm_registry_types_by_short_name_chain(ctx->registry, name, &it);
+    for (int ti; (ti = cbm_type_short_iter_next(&it)) >= 0;) {
+        const char *qn = it.reg->types[ti].qualified_name;
+        size_t qn_len = qn ? strlen(qn) : 0;
+        if (qn_len <= name_len + 1 || qn[qn_len - name_len - 1] != '.' ||
+            strcmp(qn + qn_len - name_len, name) != 0 || strcmp(qn, type_qn) == 0)
+            continue;
+        if (!by_name || strcmp(by_name, qn) != 0) {
+            name_hits++;
+            by_name = qn;
+        }
+        /* The package is qn minus ".<name>"; compare its last segment. */
+        const char *pkg_end = qn + qn_len - name_len - 1;
+        const char *seg = pkg_end;
+        while (seg > qn && seg[-1] != '.')
+            seg--;
+        if ((size_t)(pkg_end - seg) == alias_len && strncmp(seg, alias, alias_len) == 0 &&
+            (!by_alias || strcmp(by_alias, qn) != 0)) {
+            alias_hits++;
+            by_alias = qn;
+        }
+    }
+    if (alias_hits == 1)
+        return by_alias;
+    if (alias_hits == 0 && name_hits == 1)
+        return by_name;
+    return NULL;
+}
+
+/* The field's type as the caller should see it: unchanged when it names a
+ * registered type, requalified through go_requalify_foreign_field when it is
+ * a named (or pointer-to-named) type that names nothing. */
+static const CBMType *go_resolve_field_type(GoLSPContext *ctx, const char *owner_qn,
+                                            const CBMType *t) {
+    if (!t)
+        return t;
+    if (t->kind == CBM_TYPE_POINTER) {
+        const CBMType *elem = go_resolve_field_type(ctx, owner_qn, t->data.pointer.elem);
+        return elem == t->data.pointer.elem ? t : cbm_type_pointer(ctx->arena, elem);
+    }
+    if (t->kind != CBM_TYPE_NAMED || !t->data.named.qualified_name ||
+        cbm_registry_lookup_type(ctx->registry, t->data.named.qualified_name))
+        return t;
+    const char *qn = go_requalify_foreign_field(ctx, owner_qn, t->data.named.qualified_name);
+    return qn ? cbm_type_named(ctx->arena, qn) : t;
+}
+
 static const CBMType *go_lookup_field(GoLSPContext *ctx, const char *type_qn,
                                       const char *field_name, int depth) {
     if (!type_qn || !field_name || depth > 5)
@@ -994,7 +1075,7 @@ static const CBMType *go_lookup_field(GoLSPContext *ctx, const char *type_qn,
         for (int i = 0; rt->field_names[i]; i++) {
             if (strcmp(rt->field_names[i], field_name) == 0 && rt->field_types &&
                 rt->field_types[i]) {
-                return rt->field_types[i];
+                return go_resolve_field_type(ctx, rt->qualified_name, rt->field_types[i]);
             }
         }
     }
@@ -3619,6 +3700,9 @@ CBMTypeRegistry *cbm_go_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, i
     cbm_ht_free(first_type);
 
     cbm_registry_finalize(reg);
+    /* go_requalify_foreign_field walks types by short name; without the index
+     * every miss would scan the whole project registry. */
+    cbm_registry_build_type_short_index(reg);
     reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
     return reg;
 }

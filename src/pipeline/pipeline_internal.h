@@ -1655,8 +1655,13 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
  *      a kube / k8s task DEPLOYS {via:ansible} the template it applies
  *      (pass_ansible.c). An external Chart is keyed by its publisher URL.
  *      An index built before holds none of them, so it rebuilds once on
- *      upgrade. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 9 };
+ *      upgrade.
+ *  10: (reviewd fork) Go call resolution changed: a struct field typed through
+ *      its own file's import alias now resolves from another package, and a
+ *      name guess from a non-test Go file never binds a *_test.go definition.
+ *      Unchanged files would keep edges resolved the old way, so rebuild once.
+ *      Upstream may claim 10 for something else; on rebase, take max + 1. */
+enum { CBM_SEMANTIC_INDEX_VERSION = 10 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;

@@ -6,6 +6,7 @@
  */
 #include "test_framework.h"
 #include "pipeline/pipeline.h"
+#include "graph_buffer/graph_buffer.h"
 #include "pipeline/pipeline_internal.h" /* cbm_python_import_binding_contradicts (#2127) */
 
 #include <stdlib.h>
@@ -1111,6 +1112,50 @@ static cbm_resolution_t xl_resolve(const cbm_registry_t *r, CBMLanguage lang, co
         res = (cbm_resolution_t){0};
     }
     return res;
+}
+
+/* (reviewd fork) A Go file outside *_test.go cannot reach a *_test.go
+ * definition, so a name guess landing on one is dropped. The target's file
+ * comes from its graph node; test callers, other languages and type- or
+ * import-backed answers are untouched. */
+TEST(go_test_target_vetoed_for_production_callers) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/repo");
+    ASSERT_NOT_NULL(gb);
+    cbm_gbuf_upsert_node(gb, "Method", "Upsert", "proj.internal.logic.pos.Upsert",
+                         "internal/logic/pos/config_test.go", 1, 1, "{}");
+    cbm_gbuf_upsert_node(gb, "Method", "Upsert", "proj.internal.repository.pos.Upsert",
+                         "internal/repository/pos/config_repo.go", 1, 1, "{}");
+
+    cbm_resolution_t fake = {.qualified_name = "proj.internal.logic.pos.Upsert",
+                             .strategy = "suffix_match",
+                             .confidence = 0.1,
+                             .candidate_count = 3};
+    ASSERT_TRUE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO,
+                                                   "internal/logic/pos/update.go", &fake));
+    /* A test caller may call its own fake. */
+    ASSERT_FALSE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO,
+                                                    "internal/logic/pos/update_test.go", &fake));
+    /* Go only. */
+    ASSERT_FALSE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_PYTHON,
+                                                    "internal/logic/pos/update.py", &fake));
+    /* Every name-only strategy, never an evidence-backed one. */
+    fake.strategy = "same_module";
+    ASSERT_TRUE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO, "a.go", &fake));
+    fake.strategy = "unique_name";
+    ASSERT_TRUE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO, "a.go", &fake));
+    fake.strategy = "lsp_type_dispatch";
+    ASSERT_FALSE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO, "a.go", &fake));
+    fake.strategy = "import_map";
+    ASSERT_FALSE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO, "a.go", &fake));
+    /* A production target stands. */
+    cbm_resolution_t real = {.qualified_name = "proj.internal.repository.pos.Upsert",
+                             .strategy = "suffix_match",
+                             .confidence = 0.1,
+                             .candidate_count = 3};
+    ASSERT_FALSE(cbm_registry_go_test_target_vetoed(gb, CBM_LANG_GO, "a.go", &real));
+
+    cbm_gbuf_free(gb);
+    PASS();
 }
 
 TEST(name_guess_vetoed_across_languages) {
@@ -2562,6 +2607,7 @@ SUITE(registry) {
     RUN_TEST(perl_suppress_keeps_high_confidence_and_genuine_calls);
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(lang_resolution_compatible_families);
+    RUN_TEST(go_test_target_vetoed_for_production_callers);
     RUN_TEST(name_guess_vetoed_across_languages);
     RUN_TEST(same_module_vetoed_across_languages);
     RUN_TEST(cross_language_config_caller_drops_unique_name_too);
