@@ -4061,6 +4061,12 @@ bool cbm_pipeline_incremental_generation_exact(cbm_pipeline_t *p, cbm_store_t *s
     bool exact = incr_generation_exact(p, store, project, stored, stored_count, baseline_manifest,
                                        baseline_count, &metadata_current, &doc_links_current);
     cbm_store_free_file_hashes(stored, stored_count);
+    /* (reviewd fork) The live no-op publishes nothing, so it cannot move the
+     * root. Same bytes from a new directory decline here and take the staged
+     * route, whose no-op publishes the moved root (incr_publish_root). */
+    if (exact && !incr_root_matches(store, project, cbm_pipeline_repo_path(p))) {
+        return false;
+    }
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
     if (exact) {
         incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_NOOP);
