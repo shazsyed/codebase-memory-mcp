@@ -1548,7 +1548,8 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
 
 /* The exact no-op test cbm_pipeline_run_incremental routes by, read-only on
  * an already opened generation: true when that generation is current for the
- * pipeline's mode and records exactly the baseline manifest. */
+ * pipeline's mode and records exactly the baseline manifest, and (reviewd
+ * fork) already names this run's directory as the project root. */
 bool cbm_pipeline_incremental_generation_exact(cbm_pipeline_t *p, cbm_store_t *store,
                                                const cbm_file_hash_t *baseline_manifest,
                                                int baseline_count);
